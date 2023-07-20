@@ -9,6 +9,7 @@ import random
 import csv
 import re
 import numpy as np
+import yaml
  
 
 def read_tsv_file(tsv_file):
@@ -121,10 +122,18 @@ class Audio_Augmentation:
     self.label_store = []
     self.out_dir = '/speech/ashish/mixing_audio'
     self.input_dir = ['/speech/Databases/AudioSetRaw/unbalanced_wav', '/speech/Databases/AudioSetRaw/valid_wav', '/speech/Databases/AudioSetRaw/balanced_wav']
-    self.max_audio = 1 #adjust this parameter to get max number of audio
-    self.possible_comb = [
-       "('Kettle whistle' + 'Toothbrush') * 'Buzz'",
-    ]
+    self.max_audio = 500000 #adjust this parameter to get max number of audio
+    self.global_label_size = 15
+    self.global_label_path = '/speech/ashish/global_sound.yml'
+    self.sample_label = self.max_audio // self.global_label_size
+    self.expression_path = '/speech/ashish/expression.txt'
+    
+    with open(self.expression_path) as exp:
+        self.possible_comb = [x.strip() for x in exp.readlines()]
+    
+    with open(self.global_label_path) as yaml_file:
+        self.global_label_mapping = yaml.safe_load(yaml_file)
+
     self.train_tsv_file = '/speech/ashish/audioset_strong_train.tsv'
     self.label_tsv_file = '/speech/ashish/class_labels.tsv'
     
@@ -242,84 +251,103 @@ class Audio_Augmentation:
     collect_audio = {}
     counter = 1
     for exp in self.possible_comb:
+        count_per_label = 0
         
-      print(exp)
-      tokens_old = exp
-      strings = re.findall(r"'(.*?)'", exp)
-      notation = ['a','b','c','d']
-      replacement_map = dict(zip(strings, notation[:len(strings)]))
-      not_to_label = dict(zip(notation[:len(strings)], strings))
+        while True:   
+            
+            tokens_old = exp
 
-      def replace_string(match): 
-        string = match.group(1)
-        return replacement_map.get(string, string)
-      
-      exp = re.sub(r"'(.*?)'", replace_string, exp)
-      ops_stack = []
-      i = 0
-      tokens = exp
-      input_list = []
-      for keys, values in not_to_label.items():
-        input_list.append(self.label_to_audio[values])
-      possible_combinations = list(itertools.product(*input_list))
-      print(len(possible_combinations))
-      print(not_to_label)
-      for comb in possible_combinations:
-        print(comb)
-        not_to_data = dict(zip(notation[:len(comb)],list(comb)))
-        print(not_to_data)
-        while i < len(tokens):
+            strings = re.findall(r"'(.*?)'", exp)
+            notation = ['a','b','c','d']
+
+            len_sub_labels = [len(self.global_label_mapping[x]) for x in strings]
+            sub_labels = [self.global_label_mapping[x][random.randint(0,len_sub_labels[i]-1)] for i,x in enumerate(strings)]
             
-            if tokens[i] == ' ':
-                i += 1
-                continue
+            replacement_map = dict(zip(strings, notation[:len(strings)])) #keep it with global lables for easier conversion
+
+            label_to_sub = dict(zip(strings, sub_labels))
+            not_to_label = dict(zip(notation[:len(sub_labels)], sub_labels)) #keep it with sub labels to map to dataset
+
+            def replace_string(match): 
+                string = match.group(1)
+                return replacement_map.get(string, string)
+
+            def replace_label_to_sub(match):    
+                string = match.group(1)
+                return label_to_sub.get(string, string)
             
-            elif tokens[i] == '(':
-                ops_stack.append(tokens[i])
-                
-            elif tokens[i] in ['a','b','c','d']:
-                values_stack.append(read_wav_segment(not_to_data[tokens[i]]['path'], not_to_data[tokens[i]]['start_time'], not_to_data[tokens[i]]['end_time']))
+            exp = re.sub(r"'(.*?)'", replace_string, exp)
+            exp_sub = re.sub(r"'(.*?)'", replace_label_to_sub, tokens_old)
+            ops_stack = []
             
-            elif tokens[i] == ')':
-                while len(ops_stack) != 0 and ops_stack[-1] != '(':
-                                
-                    val2 = values_stack.pop()
-                    val1 = values_stack.pop()
-                    op = ops_stack.pop()
+            tokens = exp
+            input_list = []
+            for keys, values in not_to_label.items():
+                input_list.append(self.label_to_audio[values])
+            possible_combinations = list(itertools.product(*input_list))
+            possible_combinations = random.shuffle(possible_combinations)
+            
+            i = 0 #sample some data with min(sample size, len(sub_label)) 
+            for comb in possible_combinations[:min(len(possible_combinations), 200)]: #take 
+                print(comb)
+                not_to_data = dict(zip(notation[:len(comb)],list(comb)))
+                print(not_to_data)
+                while i < len(tokens):
                     
-                    values_stack.append(self.applyOp(val1, val2, op))
-                # pop opening brace.
-                ops_stack.pop()
-            
-            # Current token is an operator.
-            else:
-                while (len(ops_stack) != 0 and opr_pred[ops_stack[-1]] >= opr_pred[tokens[i]]):
+                    if tokens[i] == ' ':
+                        i += 1
+                        continue
+                    
+                    elif tokens[i] == '(':
+                        ops_stack.append(tokens[i])
+                        
+                    elif tokens[i] in ['a','b','c','d']:
+                        values_stack.append(read_wav_segment(not_to_data[tokens[i]]['path'], not_to_data[tokens[i]]['start_time'], not_to_data[tokens[i]]['end_time']))
+                    
+                    elif tokens[i] == ')':
+                        while len(ops_stack) != 0 and ops_stack[-1] != '(':
+                                        
+                            val2 = values_stack.pop()
+                            val1 = values_stack.pop()
+                            op = ops_stack.pop()
                             
+                            values_stack.append(self.applyOp(val1, val2, op))
+                        # pop opening brace.
+                        ops_stack.pop()
+                    
+                    # Current token is an operator.
+                    else:
+                        while (len(ops_stack) != 0 and opr_pred[ops_stack[-1]] >= opr_pred[tokens[i]]):
+                                    
+                            val2 = values_stack.pop()
+                            val1 = values_stack.pop()
+                            op = ops_stack.pop()
+                            
+                            values_stack.append(self.applyOp(val1, val2, op))
+                        ops_stack.append(tokens[i])
+                    i += 1
+
+                while len(ops_stack) != 0:
+                    
                     val2 = values_stack.pop()
                     val1 = values_stack.pop()
                     op = ops_stack.pop()
-                    
                     values_stack.append(self.applyOp(val1, val2, op))
-                ops_stack.append(tokens[i])
-            i += 1
-
-        while len(ops_stack) != 0:
-            
-            val2 = values_stack.pop()
-            val1 = values_stack.pop()
-            op = ops_stack.pop()
-            values_stack.append(self.applyOp(val1, val2, op))
 
 
-        final_audio = values_stack[-1]
-        audio_name = 'audio_aug_{0}.wav'.format(counter)
-        new_path = os.path.join(self.out_dir, audio_name)
-        torchaudio.save(new_path, final_audio, sample_rate=16000)
-        final_data.append({'files': new_path, 'exp': tokens_old})
-        print(new_path)
-        counter+=1
-        if counter > self.max_audio:
-            return final_data
+                final_audio = values_stack[-1]
+                audio_name = 'audio_aug_{0}.wav'.format(counter)
+                new_path = os.path.join(self.out_dir, audio_name)
+                torchaudio.save(new_path, final_audio, sample_rate=16000)
+                final_data.append({'files': new_path, 'exp': tokens_old, 'sub_exp': exp_sub})
+                print(new_path)
+                counter+=1
+                count_per_label+=1
+                if counter > self.max_audio:
+                    return final_data
+                exit()
+            if count_per_label > self.sample_label:
+                break        
 
     return final_data    
               
