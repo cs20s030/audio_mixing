@@ -10,6 +10,7 @@ import csv
 import re
 import numpy as np
 import yaml
+from tqdm import tqdm
  
 
 def read_tsv_file(tsv_file):
@@ -125,7 +126,8 @@ class Audio_Augmentation:
     self.max_audio = 500000 #adjust this parameter to get max number of audio
     self.global_label_size = 15
     self.global_label_path = '/speech/ashish/global_sound.yml'
-    self.sample_label = self.max_audio // self.global_label_size
+    self.sample_label = 0
+    self.event_count_prob = {4: 0.1, 3: 0.6, 2: 0.3}
     self.expression_path = '/speech/ashish/expression.txt'
     
     with open(self.expression_path) as exp:
@@ -149,34 +151,42 @@ class Audio_Augmentation:
     for i in range(label_tsv.shape[0]):
         id_to_label[label_tsv['id'].iloc[i]] = label_tsv['label'].iloc[i]
     label_to_file = {}
+    count_problem_file = 0
+    print(train_tsv.shape[0])
     for i in range(train_tsv.shape[0]):
         path = '_'.join(train_tsv['filename'].iloc[i].split('_')[0:-1])+'.wav'
         ID = train_tsv['event_label'].iloc[i]
         start_time = train_tsv['onset'].iloc[i]
         end_time = train_tsv['offset'].iloc[i]
         label = id_to_label[ID]
-        if label in label_to_file.keys():
-            if os.path.exists(os.path.join(self.input_dir[0],path)):
-                label_to_file[label].append({'path': os.path.join(self.input_dir[0],path), 'start_time': start_time, 'end_time': end_time})
-            elif os.path.exists(os.path.join(self.input_dir[1],path)):
-                label_to_file[label].append({'path': os.path.join(self.input_dir[1],path), 'start_time': start_time, 'end_time': end_time})
-            elif os.path.exists(os.path.join(self.input_dir[2],path)):
-                label_to_file[label].append({'path': os.path.join(self.input_dir[2],path), 'start_time': start_time, 'end_time': end_time})
+        
+        if (end_time - start_time) > 1 and (end_time - start_time) < 9.5:
+            if label in label_to_file.keys():
+                if os.path.exists(os.path.join(self.input_dir[0],path)):
+                    label_to_file[label].append({'path': os.path.join(self.input_dir[0],path), 'start_time': start_time, 'end_time': end_time})
+                elif os.path.exists(os.path.join(self.input_dir[1],path)):
+                    label_to_file[label].append({'path': os.path.join(self.input_dir[1],path), 'start_time': start_time, 'end_time': end_time})
+                elif os.path.exists(os.path.join(self.input_dir[2],path)):
+                    label_to_file[label].append({'path': os.path.join(self.input_dir[2],path), 'start_time': start_time, 'end_time': end_time})
+                else:
+                    pass    
+
             else:
-                pass    
+                if os.path.exists(os.path.join(self.input_dir[0],path)):
+                    label_to_file[label] = [{'path': os.path.join(self.input_dir[0],path), 'start_time': start_time, 'end_time': end_time}]
+                elif os.path.exists(os.path.join(self.input_dir[1],path)):
+                    label_to_file[label] = [{'path': os.path.join(self.input_dir[1],path), 'start_time': start_time, 'end_time': end_time}]
+                elif os.path.exists(os.path.join(self.input_dir[2],path)):
+                    label_to_file[label] = [{'path': os.path.join(self.input_dir[2],path), 'start_time': start_time, 'end_time': end_time}]
+                else:
+                    pass
 
         else:
-            if os.path.exists(os.path.join(self.input_dir[0],path)):
-                label_to_file[label] = [{'path': os.path.join(self.input_dir[0],path), 'start_time': start_time, 'end_time': end_time}]
-            elif os.path.exists(os.path.join(self.input_dir[1],path)):
-                label_to_file[label] = [{'path': os.path.join(self.input_dir[1],path), 'start_time': start_time, 'end_time': end_time}]
-            elif os.path.exists(os.path.join(self.input_dir[2],path)):
-                label_to_file[label] = [{'path': os.path.join(self.input_dir[2],path), 'start_time': start_time, 'end_time': end_time}]
-            else:
-                pass
-                
+            count_problem_file+=1
+                    
     self.label_to_audio = label_to_file        
-    
+    print(count_problem_file)
+
   def applyOp(self, val1, val2, op):
      
      if op == '+':
@@ -250,19 +260,28 @@ class Audio_Augmentation:
     # stack to store operators.
     collect_audio = {}
     counter = 1
-    for exp in self.possible_comb:
+    
+    output_file = open('final_audio.csv', 'w', newline='')
+    keys = ['files', 'exp', 'sub_exp']
+    dict_writer = csv.DictWriter(output_file, keys)
+    dict_writer.writeheader()
+    
+    for exp in tqdm(self.possible_comb, desc="Processing"):
         count_per_label = 0
-        
-        while True:   
+        self.sample_label = self.max_audio * self.event_count_prob[len(re.findall(r"'(.*?)'", exp))] // 50 #50 is the total number of exp
+        while count_per_label < self.sample_label:   
             
             tokens_old = exp
 
             strings = re.findall(r"'(.*?)'", exp)
+            print('strings: ', strings)
             notation = ['a','b','c','d']
 
-            len_sub_labels = [len(self.global_label_mapping[x]) for x in strings]
-            sub_labels = [self.global_label_mapping[x][random.randint(0,len_sub_labels[i]-1)] for i,x in enumerate(strings)]
-            
+            len_sub_labels = [len(self.global_label_mapping[x.lower()]) for x in strings]
+            print('len_sub_labels: ', len_sub_labels)
+            sub_labels = [self.global_label_mapping[x.lower()][random.randint(0,len_sub_labels[i]-1)] for i,x in enumerate(strings)]
+            print('sub_labels: ', sub_labels)
+
             replacement_map = dict(zip(strings, notation[:len(strings)])) #keep it with global lables for easier conversion
 
             label_to_sub = dict(zip(strings, sub_labels))
@@ -276,22 +295,26 @@ class Audio_Augmentation:
                 string = match.group(1)
                 return label_to_sub.get(string, string)
             
-            exp = re.sub(r"'(.*?)'", replace_string, exp)
+            tokens = re.sub(r"'(.*?)'", replace_string, exp)
             exp_sub = re.sub(r"'(.*?)'", replace_label_to_sub, tokens_old)
             ops_stack = []
             
-            tokens = exp
             input_list = []
-            for keys, values in not_to_label.items():
-                input_list.append(self.label_to_audio[values])
-            possible_combinations = list(itertools.product(*input_list))
-            possible_combinations = random.shuffle(possible_combinations)
+            try:
+                for keys, values in not_to_label.items():
+                    input_list.append(random.sample(self.label_to_audio[values], min(int(self.sample_label ** (1/len(sub_labels))), len(self.label_to_audio[values]))))
+            except:
+                print("Label not found!!")
+                continue        
             
-            i = 0 #sample some data with min(sample size, len(sub_label)) 
-            for comb in possible_combinations[:min(len(possible_combinations), 200)]: #take 
-                print(comb)
+            possible_combinations = list(itertools.product(*input_list))
+            possible_combinations = random.sample(possible_combinations, min(len(possible_combinations), 50))
+             #sample some data with min(sample size, len(sub_label))
+            for comb in possible_combinations: #take 
+                
                 not_to_data = dict(zip(notation[:len(comb)],list(comb)))
-                print(not_to_data)
+          
+                i = 0
                 while i < len(tokens):
                     
                     if tokens[i] == ' ':
@@ -340,15 +363,19 @@ class Audio_Augmentation:
                 new_path = os.path.join(self.out_dir, audio_name)
                 torchaudio.save(new_path, final_audio, sample_rate=16000)
                 final_data.append({'files': new_path, 'exp': tokens_old, 'sub_exp': exp_sub})
-                print(new_path)
+                dict_writer.writerows([{'files': new_path, 'exp': tokens_old, 'sub_exp': exp_sub}])
                 counter+=1
                 count_per_label+=1
                 if counter > self.max_audio:
+                    output_file.close()
                     return final_data
-                exit()
-            if count_per_label > self.sample_label:
-                break        
 
+                if count_per_label > self.sample_label:
+                    break
+            if count_per_label > self.sample_label:
+                break
+    
+    output_file.close()
     return final_data    
               
 def main():
